@@ -338,27 +338,10 @@
         </div>
 
         <div class="row">
-          <div class="label">Run forever
-            <span class="hint">no trial limit — play until you stop</span>
+          <div class="label">Session length
+            <span class="hint" id="sessionHint">20 min</span>
           </div>
-          <div class="control"><button class="toggle" id="endlessTog" role="switch" aria-checked="false"></button></div>
-        </div>
-
-        <div class="row" id="blocksRow">
-          <div class="label">Blocks per session
-            <span class="hint" id="blockHint">20 blocks · ≈ 22 min</span>
-          </div>
-          <div class="control">
-            <select id="blocksSel">
-              <option value="3">3</option>
-              <option value="5">5</option>
-              <option value="10">10</option>
-              <option value="15">15</option>
-              <option value="20" selected>20</option>
-              <option value="25">25</option>
-              <option value="40">40</option>
-            </select>
-          </div>
+          <div class="control"><input type="range" id="sessionRange" min="10" max="190" step="10" value="20"></div>
         </div>
       </div>
 
@@ -431,6 +414,7 @@
     <div class="readouts">
       <div class="pill" id="pBlockPill">BLOCK <b id="pBlock">1/20</b></div>
       <div class="pill">TRIAL <b id="pTrial">0/22</b></div>
+      <div class="pill" id="pTimePill">TIME <b id="pTime">0:00</b></div>
       <div class="pill">N&#8209;BACK <b id="pN">2</b></div>
     </div>
     <div class="stage">
@@ -514,14 +498,29 @@
   const settings = {
     startN: 2, adaptive: true, paceMs: 3000,
     base: 20, targets: 6, setSize: 8,
-    blocks: 20, rate: 1.0, voiceURI: "", guided: true, lurePct: 0, passive: false, endless: false
+    sessionMin: 20, rate: 1.0, voiceURI: "", guided: true, lurePct: 0, passive: false
   };
   const state = {
     screen:"setup", n:2, blockIndex:0, accepting:false,
     block:null, session:null, timer:null, cueTimer:null, voices:[]
   };
-  // when endless is on, the session never auto-ends; otherwise it runs `blocks` blocks
-  function blockTarget(){ return settings.endless ? Infinity : (settings.blocks > 0 ? settings.blocks : 20); }
+  // session length is time-based; the top slider step (>180) means run with no time limit
+  function sessionInfinite(){ return settings.sessionMin > 180; }
+  function sessionMs(){ return sessionInfinite() ? Infinity : settings.sessionMin * 60000; }
+  function elapsedMs(){ return state.session ? Date.now() - state.session.start : 0; }
+  function timeUp(){ return !sessionInfinite() && elapsedMs() >= sessionMs(); }
+  function fmtClock(ms){
+    let s = Math.max(0, Math.round(ms/1000));
+    const h = Math.floor(s/3600); s %= 3600;
+    const m = Math.floor(s/60); s %= 60;
+    return h>0 ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}` : `${m}:${String(s).padStart(2,"0")}`;
+  }
+  function fmtSessionLabel(min){
+    if(min > 180) return "∞ infinite time";
+    const h = Math.floor(min/60), m = min%60;
+    if(h===0) return `${m} min`;
+    return m===0 ? `${h} hr` : `${h} hr ${m} min`;
+  }
 
   /* ---------------- persistence (graceful) ---------------- */
   async function sGet(k){ try{ if(!window.storage) return null; const r=await window.storage.get(k); return r?r.value:null; }catch(e){ return null; } }
@@ -696,7 +695,7 @@
   }
 
   function runBlock(){
-    if(settings.endless){
+    if(settings.passive){
       // one unbounded, lazily-generated stream — no block boundaries, no trial cap
       state.block = { continuous:true, n:state.n, L:Infinity, seq:[], isT:[], isL:[], targets:0, lures:0 };
     } else {
@@ -709,6 +708,8 @@
 
   function nextTrial(){
     const b = state.block;
+    // continuous (passive) stream ends only when the chosen time runs out
+    if(b.continuous && timeUp()){ finishSession(); return; }
     b.index++;
     if(b.index >= b.L){ endBlock(); return; }
     if(b.continuous && b.seq[b.index] === undefined){ genNextDigit(b); }
@@ -763,13 +764,6 @@
 
   function endBlock(){
     const b = state.block;
-    // passive: no scoring, no adaptation, no results — just flow straight on
-    if(settings.passive){
-      state.blockIndex++;
-      if(state.blockIndex >= blockTarget()){ finishSession(); }
-      else { runBlock(); }
-      return;
-    }
     const errors = b.misses + b.fa;
     const playedN = b.n;
     let verdict = "hold";
@@ -784,8 +778,8 @@
   }
 
   function showResults(b, playedN, verdict, errors){
-    const target = blockTarget(), finite = target !== Infinity;
-    $("rBlockLabel").textContent = finite ? `Block ${state.blockIndex} of ${target} complete` : `Block ${state.blockIndex} complete`;
+    const done = timeUp();
+    $("rBlockLabel").textContent = `Block ${state.blockIndex} complete`;
     const v = $("verdict"), vs = $("verdictSub");
     v.className = "verdict "+verdict;
     if(verdict==="up"){ v.textContent = `Level up → N=${state.n}`; vs.textContent = `${errors} error${errors===1?"":"s"} · clean enough to climb`; }
@@ -806,14 +800,14 @@
     } else {
       $("sLureCell").style.display = "none";
     }
-    if(finite){ $("rBarWrap").style.display=""; $("rBar").style.width = Math.round(100*state.blockIndex/target)+"%"; }
-    else { $("rBarWrap").style.display="none"; }
-    $("contBtn").textContent = (finite && state.blockIndex >= target) ? "See summary" : "Continue";
+    if(sessionInfinite()){ $("rBarWrap").style.display="none"; }
+    else { $("rBarWrap").style.display=""; $("rBar").style.width = Math.min(100, Math.round(100*elapsedMs()/sessionMs()))+"%"; }
+    $("contBtn").textContent = done ? "See summary" : "Continue";
     show("results");
   }
 
   function continueSession(){
-    if(state.blockIndex >= blockTarget()){ finishSession(); return; }
+    if(timeUp()){ finishSession(); return; }
     beginBlockWithCountdown();
   }
 
@@ -831,29 +825,10 @@
 
     if(settings.passive){
       renderSummaryGrid([
-        {k:"Time", v:fmtDur(dur)},
-        {k:"Blocks", v:String(state.blockIndex)},
-        {k:"Level", v:"N"+settings.startN},
-        {k:"Trials", v:String(state.session ? state.session.trials : 0)}
-      ]);
-      $("zChipsCard").style.display = "none";
-      sSet(SETKEY, JSON.stringify(serialize()));
-      show("summary");
-      return;
-    }
-
-    if(settings.endless){
-      // scored continuous run: totals from the single unbounded stream
-      const b = state.block || {hits:0,misses:0,fa:0,targets:0,lures:0,lureFa:0};
-      const hitRate = b.targets>0 ? Math.round(100*b.hits/b.targets) : 0;
-      const items = [
-        {k:"Time", v:fmtDur(dur)},
+        {k:"Time", v:fmtClock(dur)},
         {k:"Trials", v:String(state.session ? state.session.trials : 0)},
-        {k:"Hit rate", v:`${hitRate}<small>%</small>`},
-        {k:"Level", v:"N"+state.n}
-      ];
-      if(b.lures>0) items.push({k:"Lures held", v:`${b.lures-b.lureFa}/${b.lures}`});
-      renderSummaryGrid(items);
+        {k:"Level", v:"N"+settings.startN}
+      ]);
       $("zChipsCard").style.display = "none";
       sSet(SETKEY, JSON.stringify(serialize()));
       show("summary");
@@ -870,8 +845,8 @@
     const hitRate = targSum? Math.round(100*hitsSum/targSum) : 0;
 
     renderSummaryGrid([
+      {k:"Time", v:fmtClock(dur)},
       {k:"Blocks", v:String(blocks.length)},
-      {k:"Average N", v:avg.toFixed(1)},
       {k:"Peak N", v:String(peak)},
       {k:"Hit rate", v:`${hitRate}<small>%</small>`}
     ]);
@@ -897,9 +872,14 @@
   }
 
   /* ---------------- readouts ---------------- */
+  function paintTime(){
+    const inf = sessionInfinite();
+    $("pTime").textContent = inf ? fmtClock(elapsedMs()) : fmtClock(Math.max(0, sessionMs() - elapsedMs()));
+  }
   function paintReadouts(pre){
     $("pN").textContent = state.n;
-    if(settings.endless){
+    paintTime();
+    if(settings.passive){
       $("pBlockPill").style.display = "none";
       const t = (state.block && !pre) ? state.block.index+1 : 0;
       $("pTrial").textContent = `${t}`;
@@ -907,9 +887,7 @@
     }
     $("pBlockPill").style.display = "";
     const L = settings.base + state.n;
-    const target = blockTarget(), tnum = target===Infinity ? "∞" : target;
-    const cur = target===Infinity ? state.blockIndex+1 : Math.min(state.blockIndex+1, target);
-    $("pBlock").textContent = `${cur}/${tnum}`;
+    $("pBlock").textContent = `${state.blockIndex+1}`;
     const tIndex = (state.block && !pre) ? Math.min(state.block.index+1, L) : 0;
     $("pTrial").textContent = `${tIndex}/${L}`;
   }
@@ -1116,7 +1094,7 @@
   function serialize(){
     return { startN:settings.startN, adaptive:settings.adaptive, paceMs:settings.paceMs,
       base:settings.base, targets:settings.targets, setSize:settings.setSize,
-      blocks:settings.blocks, rate:settings.rate, voiceURI:settings.voiceURI, guided:settings.guided, lurePct:settings.lurePct, passive:settings.passive, endless:settings.endless };
+      sessionMin:settings.sessionMin, rate:settings.rate, voiceURI:settings.voiceURI, guided:settings.guided, lurePct:settings.lurePct, passive:settings.passive };
   }
   function applyToUI(){
     $("nVal").textContent = settings.startN;
@@ -1126,12 +1104,9 @@
     $("cueTog").setAttribute("aria-checked", settings.guided);
     $("passTog").classList.toggle("on", settings.passive);
     $("passTog").setAttribute("aria-checked", settings.passive);
-    $("adaptRow").classList.toggle("disabled", settings.passive || settings.endless);
-    $("endlessTog").classList.toggle("on", settings.endless);
-    $("endlessTog").setAttribute("aria-checked", settings.endless);
-    $("blocksRow").classList.toggle("disabled", settings.endless);
+    $("adaptRow").classList.toggle("disabled", settings.passive);
     $("paceSel").value = String(settings.paceMs);
-    $("blocksSel").value = String(settings.blocks);
+    $("sessionRange").value = String(Math.min(190, settings.sessionMin));
     $("baseSel").value = String(settings.base);
     $("targSel").value = String(settings.targets);
     $("setSel").value = String(settings.setSize);
@@ -1139,24 +1114,22 @@
     $("rateHint").textContent = settings.rate.toFixed(1)+"×";
     $("lureRange").value = settings.lurePct;
     $("lureHint").textContent = `${settings.lurePct}% lures · n±1 near-misses`;
-    updateBlockHint();
+    updateSessionHint();
   }
-  function updateBlockHint(){
+  function updateSessionHint(){
     const score = settings.passive ? " · no scoring" : "";
-    if(settings.endless){
-      $("blockHint").textContent = "off — runs until you stop" + score;
-      return;
-    }
-    const trials = settings.base + settings.startN;
-    const mins = Math.round(settings.blocks * trials * (settings.paceMs/1000) / 60);
-    $("blockHint").textContent = `${settings.blocks} blocks · ≈ ${mins} min` + score;
+    $("sessionHint").textContent = fmtSessionLabel(settings.sessionMin) + score;
   }
 
   async function init(){
     const raw = await sGet(SETKEY);
     if(raw){ try{ Object.assign(settings, JSON.parse(raw)); }catch(e){} }
     settings.startN = Math.min(CEIL, Math.max(1, settings.startN|0 || 2));
-    if(!(settings.blocks > 0)){ settings.endless = true; settings.blocks = 20; }
+    // migrate older saves: endless → infinite time; otherwise default/clamp to a valid step
+    if(settings.endless === true) settings.sessionMin = 190;
+    if(!(settings.sessionMin >= 10)) settings.sessionMin = 20;
+    settings.sessionMin = Math.min(190, Math.round(settings.sessionMin/10)*10);
+    delete settings.endless; delete settings.blocks;
     state.n = settings.startN;
     applyToUI();
     if(synth) loadVoices();
@@ -1171,7 +1144,6 @@
     settings.startN = Math.min(CEIL, Math.max(1, settings.startN + d));
     state.n = settings.startN;
     $("nVal").textContent = settings.startN;
-    updateBlockHint();
   });
   $("adaptTog").addEventListener("click", function(){
     settings.adaptive = !settings.adaptive;
@@ -1187,20 +1159,12 @@
     settings.passive = !settings.passive;
     this.classList.toggle("on", settings.passive);
     this.setAttribute("aria-checked", settings.passive);
-    $("adaptRow").classList.toggle("disabled", settings.passive || settings.endless);
-    updateBlockHint();
+    $("adaptRow").classList.toggle("disabled", settings.passive);
+    updateSessionHint();
   });
-  $("endlessTog").addEventListener("click", function(){
-    settings.endless = !settings.endless;
-    this.classList.toggle("on", settings.endless);
-    this.setAttribute("aria-checked", settings.endless);
-    $("blocksRow").classList.toggle("disabled", settings.endless);
-    $("adaptRow").classList.toggle("disabled", settings.passive || settings.endless);
-    updateBlockHint();
-  });
-  $("paceSel").addEventListener("change", e=>{ settings.paceMs = +e.target.value; updateBlockHint(); });
-  $("blocksSel").addEventListener("change", e=>{ settings.blocks = +e.target.value; updateBlockHint(); });
-  $("baseSel").addEventListener("change", e=>{ settings.base = +e.target.value; updateBlockHint(); });
+  $("sessionRange").addEventListener("input", e=>{ settings.sessionMin = +e.target.value; updateSessionHint(); });
+  $("paceSel").addEventListener("change", e=>{ settings.paceMs = +e.target.value; });
+  $("baseSel").addEventListener("change", e=>{ settings.base = +e.target.value; });
   $("targSel").addEventListener("change", e=>{ settings.targets = +e.target.value; });
   $("setSel").addEventListener("change", e=>{ settings.setSize = +e.target.value; });
   $("rateRange").addEventListener("input", e=>{ settings.rate = +e.target.value; $("rateHint").textContent = settings.rate.toFixed(1)+"×"; });
